@@ -109,6 +109,83 @@ def export_txt(rows, path, dono, today):
             f.write("\n".join(lines))
             f.write("\n\n")
 
+# ── Deck export ───────────────────────────────────────────────────────────────
+
+_SEC_LABELS = {
+    "criaturas": "CRIATURAS",
+    "feiticos":  "FEITIÇOS/ENCANTAMENTOS",
+    "terrenos":  "TERRENOS",
+}
+
+def fetch_decks(conn, dono):
+    """Return deck data for all decks matching dono (or all if dono is None)."""
+    try:
+        decks = conn.execute("""
+            SELECT id, nome, dono, formato, cores, status,
+                   notas, sinergias, linha_de_jogo, substituicoes
+            FROM decks
+            WHERE (? IS NULL OR dono = ?)
+            ORDER BY nome
+        """, (dono, dono)).fetchall()
+    except sqlite3.OperationalError:
+        return []   # table doesn't exist yet — no decks created
+
+    result = []
+    for deck in decks:
+        deck_id = deck[0]
+        try:
+            rows = conn.execute("""
+                SELECT dc.nome, dc.quantidade, dc.secao,
+                       CASE WHEN dc.card_id IS NOT NULL THEN 1 ELSE 0 END
+                FROM deck_cards dc
+                WHERE dc.deck_id = ?
+                ORDER BY dc.secao, dc.nome
+            """, (deck_id,)).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
+        sections: dict = {}
+        in_col = 0
+        for nome, qty, secao, matched in rows:
+            key = secao if secao in ("criaturas", "feiticos", "terrenos") else "feiticos"
+            sections.setdefault(key, []).append((nome, qty))
+            if matched:
+                in_col += 1
+        result.append((deck, sections, in_col, len(rows)))
+    return result
+
+
+def append_txt_decks(deck_data, path):
+    """Append deck listings to an existing txt export file."""
+    if not deck_data:
+        return
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"\n\n{'═' * 62}\n")
+        f.write(f"DECKS ({len(deck_data)})\n")
+        f.write(f"{'═' * 62}\n\n")
+        for deck, sections, in_col, total in deck_data:
+            _, nome, dono_d, formato, cores, status, notas, sinergias, linha_jogo, subs = deck
+            meta = "  ·  ".join(filter(None, [dono_d, formato, cores, status]))
+            f.write(f"▶ {nome}  [{meta}]  {in_col}/{total} na coleção\n")
+            for sec in ("criaturas", "feiticos", "terrenos"):
+                cards = sections.get(sec, [])
+                if not cards:
+                    continue
+                total_qty = sum(q for _, q in cards)
+                card_list = ",  ".join(
+                    f"{q}× {n}" if q > 1 else n for n, q in cards
+                )
+                f.write(f"  {_SEC_LABELS[sec]} ({total_qty}): {card_list}\n")
+            for label, text in [("Descrição", notas), ("Sinergias", sinergias),
+                                 ("Linha de jogo", linha_jogo), ("Substituições", subs)]:
+                if text and text.strip():
+                    truncated = text.strip()[:300]
+                    if len(text.strip()) > 300:
+                        truncated += "…"
+                    f.write(f"  {label}: {truncated}\n")
+            f.write("\n")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -134,17 +211,21 @@ def main():
 
     export_csv(rows, csv_path)
     export_txt(rows, txt_path, dono, today)
+
+    deck_data = fetch_decks(conn, dono)
+    append_txt_decks(deck_data, txt_path)
     conn.close()
 
     # ── Summary table ─────────────────────────────────────────────────────────
     label = dono or "todos os donos"
-    console.print(f"\n[bold green]Exportado[/bold green] — {len(rows)} cartas ({label})\n")
+    console.print(f"\n[bold green]Exportado[/bold green] — {len(rows)} cartas"
+                  f" + {len(deck_data)} deck(s)  ({label})\n")
 
     t = Table(show_header=False, box=None, padding=(0, 2))
     t.add_column(style="dim")
     t.add_column()
     t.add_row("CSV  (todos os campos):", str(csv_path))
-    t.add_row("TXT  (optimizado para AI):", str(txt_path))
+    t.add_row("TXT  (colecção + decks):", str(txt_path))
     console.print(t)
 
     console.print(
