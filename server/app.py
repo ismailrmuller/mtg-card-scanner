@@ -648,6 +648,12 @@ def main(page: ft.Page):
         border_color="#0f3460", expand=True
     )
     proc_chips     = ft.Row(wrap=True, spacing=6, run_spacing=6)
+    proc_deck_dd   = ft.Dropdown(
+        label="Adicionar ao deck (opcional)", border_color="#0f3460",
+        hint_text="— coleção geral —", expand=True,
+        options=[ft.dropdown.Option(key="", text="— coleção geral —")],
+        value="",
+    )
     proc_btn       = ft.ElevatedButton(
         "Processar agora", icon=ft.Icons.AUTO_FIX_HIGH,
         style=ft.ButtonStyle(bgcolor=ACCENT, color="#fff"), width=220
@@ -673,6 +679,13 @@ def main(page: ft.Page):
                 setattr(proc_tf, "value", name), page.update()
             )
             proc_chips.controls.append(btn)
+        decks = get_all_decks()
+        proc_deck_dd.options = [ft.dropdown.Option(key="", text="— coleção geral —")] + [
+            ft.dropdown.Option(key=r[0], text=f"{r[1]}  ({r[2] or '?'})")
+            for r in decks
+        ]
+        if proc_deck_dd.value not in {r[0] for r in decks}:
+            proc_deck_dd.value = ""
         page.update()
 
     def run_processar(e):
@@ -683,6 +696,17 @@ def main(page: ft.Page):
         if not dono:
             show_snack("Escreve o nome do dono das cartas.")
             return
+        target_deck = proc_deck_dd.value or ""
+
+        # Snapshot highest card ID before processing so we can find new ones after
+        max_id_before = 0
+        if DB_PATH.is_file():
+            conn = sqlite3.connect(DB_PATH)
+            max_id_before = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM cards"
+            ).fetchone()[0]
+            conn.close()
+
         proc_running         = True
         proc_btn.disabled    = True
         proc_bar.visible     = True
@@ -727,6 +751,55 @@ def main(page: ft.Page):
                     page.update()
                     _last_ui[0] = now
             p.wait()
+
+            # Link newly identified cards to the selected deck
+            if target_deck and DB_PATH.is_file():
+                try:
+                    conn = sqlite3.connect(DB_PATH)
+                    _deck_mod.ensure_deck_schema(conn)
+                    new_cards = conn.execute(
+                        "SELECT id, nome, tipo FROM cards WHERE id > ?",
+                        (max_id_before,)
+                    ).fetchall()
+                    added = 0
+                    for cid, nome, tipo in new_cards:
+                        tipo_l = (tipo or "").lower()
+                        sec = ("terrenos"  if "terreno" in tipo_l or "terra" in tipo_l or "land" in tipo_l
+                               else "criaturas" if "criatura" in tipo_l or "creature" in tipo_l
+                               else "feiticos")
+                        existing = conn.execute(
+                            "SELECT id FROM deck_cards WHERE deck_id=? AND LOWER(nome)=LOWER(?)",
+                            (target_deck, nome)
+                        ).fetchone()
+                        if existing:
+                            conn.execute(
+                                "UPDATE deck_cards SET quantidade=quantidade+1, card_id=? WHERE id=?",
+                                (cid, existing[0])
+                            )
+                        else:
+                            conn.execute(
+                                "INSERT INTO deck_cards (deck_id, card_id, nome, quantidade, secao) VALUES (?,?,?,1,?)",
+                                (target_deck, cid, nome, sec)
+                            )
+                        added += 1
+                    conn.commit()
+                    conn.close()
+                    if added:
+                        deck_nome = next(
+                            (r[1] for r in get_all_decks() if r[0] == target_deck), target_deck
+                        )
+                        proc_log.controls.append(
+                            ft.Text(f"✓ {added} carta(s) adicionada(s) ao deck '{deck_nome}'",
+                                    size=11, color="#27ae60")
+                        )
+                        page.update()
+                except Exception as ex:
+                    proc_log.controls.append(
+                        ft.Text(f"Aviso: não foi possível ligar ao deck — {ex}",
+                                size=11, color="#e94560")
+                    )
+                    page.update()
+
             proc_running           = False
             proc_btn.disabled      = False
             proc_bar.visible       = False
@@ -750,7 +823,10 @@ def main(page: ft.Page):
                     ft.Container(height=4),
                     ft.Text("Clica num nome:", size=11, color="#555555"),
                     proc_chips,
-                    ft.Container(height=16),
+                    ft.Container(height=12),
+                    ft.Text("Deck (opcional):", size=13, color="#888888"),
+                    proc_deck_dd,
+                    ft.Container(height=8),
                     proc_btn,
                     ft.Container(height=8),
                     proc_bar,
